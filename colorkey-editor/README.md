@@ -26,7 +26,10 @@ ColorKeyEditor.exe [file.pak | folder] ...
   sheet.
 - **Transparency key view** shows the sheet the way the client's `PutSpriteFast` draws it, with no blending: key
   pixels become a checkerboard. With *Match the key as the client does (RGB565)* on (the default), every pixel with
-  the key's 16-bit value counts as key, exactly as in game; off, only the exact 24-bit key colour does. Selected
+  the key's 16-bit value counts as key, exactly as in game; off, only the exact 24-bit key colour does.
+  *Effect* (`E`) is for art rendered over its key, such as spell glows on black: each pixel's distance from the key
+  becomes its opacity, so the dark glow fades out instead of showing as a dark halo. It turns the key view on with it, and is a preview
+  only. Selected
   colours show in magenta, so drift pixels
   stand out. Frames are outlined in cyan.
 - **Canvas click selects colour**: click a pixel to select or deselect its colour, drag to add every colour swept

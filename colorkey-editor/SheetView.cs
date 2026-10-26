@@ -25,6 +25,31 @@ public sealed class SheetView : Control
     // In the key view, treat a pixel as transparent the way the client does (PutSpriteFast): same RGB565 value as
     // the key. Off: only the exact 24-bit key colour.
     public bool ClientMatch { get; set; } = true;
+    // Effect view: art rendered over its key colour (glows, spells) is shown with the key unblended out, so how
+    // far a pixel is from the key is its opacity. A preview only; the pixels are not changed.
+    public bool EffectView { get; set; }
+
+    // Colour-to-alpha against the key, then composited over `ground`: per channel, the share of the way from the
+    // key to the channel's limit; the largest share is the alpha, and the colour is un-blended by it.
+    private static int OverAsEffect(int c, int key, int ground)
+    {
+        int[] p = { c >> 16 & 255, c >> 8 & 255, c & 255 }, k = { key >> 16 & 255, key >> 8 & 255, key & 255 };
+        int[] g = { ground >> 16 & 255, ground >> 8 & 255, ground & 255 };
+        double a = 0;
+        for (int i = 0; i < 3; i++)
+        {
+            double span = p[i] >= k[i] ? 255 - k[i] : k[i];
+            if (span > 0) a = Math.Max(a, Math.Abs(p[i] - k[i]) / span);
+        }
+        if (a <= 0) return ground;
+        int r = 0;
+        for (int i = 0; i < 3; i++)
+        {
+            double f = Math.Clamp(k[i] + (p[i] - k[i]) / a, 0, 255);
+            r = r << 8 | (int)Math.Round(f * a + g[i] * (1 - a));
+        }
+        return r;
+    }
     public HashSet<int> Highlight { get; } = new();
     public Color HighlightColor { get; set; } = Color.Magenta;
     public float Zoom => zoom;
@@ -111,8 +136,8 @@ public sealed class SheetView : Control
                 PixelFormat.Format32bppRgb);
             var row = new int[sheet.Width];
             int hi = HighlightColor.ToArgb() & 0xFFFFFF;
-            bool plain = !KeyView && Highlight.Count == 0;
-            int key565 = SheetImage.To565(sheet.Key);   // pixels go straight in, no per-pixel work
+            bool plain = !KeyView && Highlight.Count == 0;   // pixels go straight in, no per-pixel work
+            int key565 = SheetImage.To565(sheet.Key);
             for (int y = 0; y < sheet.Height; y++)
             {
                 if (plain)
@@ -125,8 +150,11 @@ public sealed class SheetView : Control
                     int c = sheet.Pixels[y * sheet.Width + x];
                     if (KeyView)
                     {
-                        if (c == sheet.Key || (ClientMatch && SheetImage.To565(c) == key565)) c = ((x >> 2) + (y >> 2)) % 2 == 0 ? 0xC8C8C8 : 0x8C8C8C;
+                        int checker = ((x >> 2) + (y >> 2)) % 2 == 0 ? 0xC8C8C8 : 0x8C8C8C;
+                        bool isKey = c == sheet.Key || (ClientMatch && SheetImage.To565(c) == key565);
+                        if (isKey) c = checker;
                         else if (Highlight.Contains(c)) c = hi;
+                        else if (EffectView) c = OverAsEffect(c, sheet.Key, checker);
                     }
                     else if (Highlight.Contains(c)) c = hi;
                     row[x] = c;

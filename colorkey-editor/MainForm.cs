@@ -20,7 +20,7 @@ public sealed class MainForm : Form
         Dock = DockStyle.Fill,
         Hints = new[]
         {
-            "K  key = first pixel", "C  clear outside frames", "T  transparency key view",
+            "K  key = first pixel", "C  clear outside frames", "T  transparency key view", "E  effect view",
             "F  fit   1  actual size   +/-  zoom",
         },
     };
@@ -31,6 +31,7 @@ public sealed class MainForm : Form
     {
         Text = "Match the key as the client does (RGB565)", AutoSize = true, Checked = true,
     };
+    private readonly CheckBox effectBox = new() { Text = "Effect: fade towards the key (glows, spells)", AutoSize = true };
     private readonly CheckBox framesBox = new() { Text = "Show frames", AutoSize = true, Checked = true };
     private readonly RadioButton modeDrift = new() { Text = "Canvas click selects colour", AutoSize = true, Checked = true };
     private readonly RadioButton modeKey = new() { Text = "Canvas click picks key colour", AutoSize = true };
@@ -112,7 +113,7 @@ public sealed class MainForm : Form
             Text = "Wheel: zoom   Middle/right drag or Space+drag: pan\nF: fit   1: actual size\n" +
                    "Click: toggle colour   Drag: add colours   Ctrl+drag: remove",
         };
-        viewFlow.Controls.AddRange(new Control[] { keyViewBox, clientMatchBox, framesBox, modeDrift, modeKey, help });
+        viewFlow.Controls.AddRange(new Control[] { keyViewBox, clientMatchBox, effectBox, framesBox, modeDrift, modeKey, help });
         viewGroup.Controls.Add(viewFlow);
 
         var selectRow = new FlowLayoutPanel { Dock = DockStyle.Top, AutoSize = true };
@@ -174,8 +175,19 @@ public sealed class MainForm : Form
 
         tree.BeforeExpand += (_, e) => { if (e.Node != null) PopulatePak(e.Node); };
         tree.AfterSelect += (_, e) => OnTreeSelect(e.Node);
-        keyViewBox.CheckedChanged += (_, _) => { view.KeyView = keyViewBox.Checked; view.Rebuild(); };
+        keyViewBox.CheckedChanged += (_, _) =>
+        {
+            view.KeyView = keyViewBox.Checked;
+            if (!keyViewBox.Checked && effectBox.Checked) { effectBox.Checked = false; return; }   // that rebuilds
+            view.Rebuild();
+        };
         clientMatchBox.CheckedChanged += (_, _) => { view.ClientMatch = clientMatchBox.Checked; view.Rebuild(); };
+        effectBox.CheckedChanged += (_, _) =>
+        {
+            view.EffectView = effectBox.Checked;
+            if (effectBox.Checked && !keyViewBox.Checked) keyViewBox.Checked = true;   // effect is part of the key view; that rebuilds
+            else view.Rebuild();
+        };
         framesBox.CheckedChanged += (_, _) => { view.ShowFrames = framesBox.Checked; view.Invalidate(); };
         view.PixelHovered += OnHover;
         view.PixelClicked += OnPixelClicked;
@@ -775,6 +787,9 @@ public sealed class MainForm : Form
                     return true;
                 case Keys.T:
                     keyViewBox.Checked = !keyViewBox.Checked;
+                    return true;
+                case Keys.E:
+                    effectBox.Checked = !effectBox.Checked;
                     return true;
             }
         }
