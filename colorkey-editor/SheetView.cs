@@ -22,6 +22,9 @@ public sealed class SheetView : Control
 
     public bool ShowFrames { get; set; } = true;
     public bool KeyView { get; set; }
+    // In the key view, treat a pixel as transparent the way the client does (PutSpriteFast): same RGB565 value as
+    // the key. Off: only the exact 24-bit key colour.
+    public bool ClientMatch { get; set; } = true;
     public HashSet<int> Highlight { get; } = new();
     public Color HighlightColor { get; set; } = Color.Magenta;
     public float Zoom => zoom;
@@ -108,7 +111,8 @@ public sealed class SheetView : Control
                 PixelFormat.Format32bppRgb);
             var row = new int[sheet.Width];
             int hi = HighlightColor.ToArgb() & 0xFFFFFF;
-            bool plain = !KeyView && Highlight.Count == 0;   // pixels go straight in, no per-pixel work
+            bool plain = !KeyView && Highlight.Count == 0;
+            int key565 = SheetImage.To565(sheet.Key);   // pixels go straight in, no per-pixel work
             for (int y = 0; y < sheet.Height; y++)
             {
                 if (plain)
@@ -121,7 +125,7 @@ public sealed class SheetView : Control
                     int c = sheet.Pixels[y * sheet.Width + x];
                     if (KeyView)
                     {
-                        if (c == sheet.Key) c = ((x >> 2) + (y >> 2)) % 2 == 0 ? 0xC8C8C8 : 0x8C8C8C;
+                        if (c == sheet.Key || (ClientMatch && SheetImage.To565(c) == key565)) c = ((x >> 2) + (y >> 2)) % 2 == 0 ? 0xC8C8C8 : 0x8C8C8C;
                         else if (Highlight.Contains(c)) c = hi;
                     }
                     else if (Highlight.Contains(c)) c = hi;

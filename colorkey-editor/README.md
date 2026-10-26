@@ -24,7 +24,10 @@ ColorKeyEditor.exe [file.pak | folder] ...
 - **Hotkeys** (listed bottom-right of the canvas; ignored while typing in a field): `K` sets the key to the first
   pixel, `C` clears outside the frames to the key, `T` toggles the transparency key view. `K` then `C` cleans a
   sheet.
-- **Transparency key view** shows key pixels as a checkerboard and selected colours in magenta, so drift pixels
+- **Transparency key view** shows the sheet the way the client's `PutSpriteFast` draws it, with no blending: key
+  pixels become a checkerboard. With *Match the key as the client does (RGB565)* on (the default), every pixel with
+  the key's 16-bit value counts as key, exactly as in game; off, only the exact 24-bit key colour does. Selected
+  colours show in magenta, so drift pixels
   stand out. Frames are outlined in cyan.
 - **Canvas click selects colour**: click a pixel to select or deselect its colour, drag to add every colour swept
   over, Ctrl+drag to remove them. The colour list follows. **Canvas click picks key colour**: click to make it the

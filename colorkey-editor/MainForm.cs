@@ -27,6 +27,10 @@ public sealed class MainForm : Form
     private readonly Panel keySwatch = new() { Size = new Size(40, 22), BorderStyle = BorderStyle.FixedSingle };
     private readonly Label keyLabel = new() { AutoSize = true, Margin = new Padding(3, 6, 3, 0) };
     private readonly CheckBox keyViewBox = new() { Text = "Transparency key view", AutoSize = true };
+    private readonly CheckBox clientMatchBox = new()
+    {
+        Text = "Match the key as the client does (RGB565)", AutoSize = true, Checked = true,
+    };
     private readonly CheckBox framesBox = new() { Text = "Show frames", AutoSize = true, Checked = true };
     private readonly RadioButton modeDrift = new() { Text = "Canvas click selects colour", AutoSize = true, Checked = true };
     private readonly RadioButton modeKey = new() { Text = "Canvas click picks key colour", AutoSize = true };
@@ -108,7 +112,7 @@ public sealed class MainForm : Form
             Text = "Wheel: zoom   Middle/right drag or Space+drag: pan\nF: fit   1: actual size\n" +
                    "Click: toggle colour   Drag: add colours   Ctrl+drag: remove",
         };
-        viewFlow.Controls.AddRange(new Control[] { keyViewBox, framesBox, modeDrift, modeKey, help });
+        viewFlow.Controls.AddRange(new Control[] { keyViewBox, clientMatchBox, framesBox, modeDrift, modeKey, help });
         viewGroup.Controls.Add(viewFlow);
 
         var selectRow = new FlowLayoutPanel { Dock = DockStyle.Top, AutoSize = true };
@@ -171,6 +175,7 @@ public sealed class MainForm : Form
         tree.BeforeExpand += (_, e) => { if (e.Node != null) PopulatePak(e.Node); };
         tree.AfterSelect += (_, e) => OnTreeSelect(e.Node);
         keyViewBox.CheckedChanged += (_, _) => { view.KeyView = keyViewBox.Checked; view.Rebuild(); };
+        clientMatchBox.CheckedChanged += (_, _) => { view.ClientMatch = clientMatchBox.Checked; view.Rebuild(); };
         framesBox.CheckedChanged += (_, _) => { view.ShowFrames = framesBox.Checked; view.Invalidate(); };
         view.PixelHovered += OnHover;
         view.PixelClicked += OnPixelClicked;
