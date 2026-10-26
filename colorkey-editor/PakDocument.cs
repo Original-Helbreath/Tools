@@ -10,6 +10,9 @@ public sealed class PakDocument
     public List<SheetImage?> Sheets { get; } = new();
     public bool Dirty => Sheets.Any(s => s != null && (s.Modified || s.KeyChanged));
     public string? LoadError { get; private set; }
+    public bool Loading { get; set; }   // a background load is running (UI thread only)
+    // Drift of sheets that were decoded and then released, so the tree can still show it.
+    public System.Collections.Concurrent.ConcurrentDictionary<int, int> KnownDrift { get; } = new();
 
     public PakDocument(string path) => Path = path;
 
@@ -41,6 +44,15 @@ public sealed class PakDocument
 
     // Decodes the sheet on first use; throws if the image cannot be decoded.
     public SheetImage Sheet(int i) => Sheets[i] ??= SheetImage.FromSprite(Sprite(i));
+
+    // Drops a decoded sheet that has nothing unsaved, so only the sheet on screen and edited sheets stay in memory.
+    public void Release(int i)
+    {
+        var s = Sheets[i];
+        if (s == null || s.Modified || s.KeyChanged) return;
+        KnownDrift[i] = s.DriftOutside;
+        Sheets[i] = null;
+    }
 
     // Writes changed sheets and keys into the PAK and saves it to `path` (the same file, or Save As).
     public void Save(string path)

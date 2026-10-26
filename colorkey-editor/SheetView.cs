@@ -107,8 +107,14 @@ public sealed class SheetView : Control
                 PixelFormat.Format32bppRgb);
             var row = new int[sheet.Width];
             int hi = HighlightColor.ToArgb() & 0xFFFFFF;
+            bool plain = !KeyView && Highlight.Count == 0;   // pixels go straight in, no per-pixel work
             for (int y = 0; y < sheet.Height; y++)
             {
+                if (plain)
+                {
+                    System.Runtime.InteropServices.Marshal.Copy(sheet.Pixels, y * sheet.Width, data.Scan0 + y * data.Stride, sheet.Width);
+                    continue;
+                }
                 for (int x = 0; x < sheet.Width; x++)
                 {
                     int c = sheet.Pixels[y * sheet.Width + x];

@@ -9,7 +9,8 @@ public sealed class MainForm : Form
     private PakDocument? sheetDoc;     // pak that owns the sheet on the canvas
     private SheetImage? current;
     private int currentIndex = -1;
-    private bool syncing;
+    private int showVersion;           // bumped per ShowSheet; a background decode applies only if still latest
+    private Task? showTask;            // the latest background decode
     private List<ColorStat> stats = new();
 
     private readonly Font treeFont = new("Consolas", 9f);
@@ -25,8 +26,10 @@ public sealed class MainForm : Form
     private readonly Label selectedLabel = new() { AutoSize = true, Margin = new Padding(3, 6, 3, 0) };
     private readonly ListView colorList = new()
     {
-        View = View.Details, CheckBoxes = true, FullRowSelect = true, Dock = DockStyle.Fill, HideSelection = false,
+        View = View.Details, VirtualMode = true, FullRowSelect = true, MultiSelect = false, Dock = DockStyle.Fill,
+        HideSelection = false,
     };
+    private readonly Dictionary<int, int> rowOf = new();   // colour -> row in the colour list
     private readonly ToolStripStatusLabel status = new() { Spring = true, TextAlign = ContentAlignment.MiddleLeft };
     private readonly ToolStripStatusLabel hover = new() { AutoSize = false, Width = 360, TextAlign = ContentAlignment.MiddleLeft };
     private readonly ToolStripStatusLabel zoomLabel = new() { AutoSize = false, Width = 70 };
@@ -115,7 +118,8 @@ public sealed class MainForm : Form
         colorList.Columns.Add("565=key", 60);
         colorList.Columns.Add("Outside", 62, HorizontalAlignment.Right);
         colorList.Columns.Add("Inside", 62, HorizontalAlignment.Right);
-        colorList.ItemChecked += (_, e) => OnColorChecked(e.Item);
+        colorList.RetrieveVirtualItem += (_, e) => OnRetrieveItem(e);
+        colorList.MouseClick += (_, e) => OnColorListClick(e);
         colorList.ItemActivate += (_, _) => CenterOnSelectedColor();
 
         var actions = new FlowLayoutPanel { Dock = DockStyle.Top, AutoSize = true, FlowDirection = FlowDirection.TopDown };
@@ -181,38 +185,40 @@ public sealed class MainForm : Form
     }
 
     // Files open as PAK nodes; folders open as a tree of every .pak below them.
-    private void OpenPaths(IEnumerable<string> paths)
+    // Folder scans run on a worker thread; tree nodes are added on the UI thread.
+    private async void OpenPaths(IEnumerable<string> paths)
     {
         int added = 0;
-        tree.BeginUpdate();
-        try
+        foreach (var raw in paths.ToList())
         {
-            foreach (var raw in paths)
+            string path = Path.GetFullPath(raw);
+            if (Directory.Exists(path))
             {
-                string path = Path.GetFullPath(raw);
-                if (Directory.Exists(path)) added += AddFolder(path);
-                else if (File.Exists(path) && AddPak(path, tree.Nodes) != null) added++;
+                status.Text = "Scanning " + path + " ...";
+                string[] files;
+                try { files = await Task.Run(() => ScanFolder(path)); }
+                catch (Exception ex)
+                {
+                    MessageBox.Show(this, ex.Message, "Cannot read folder", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                    continue;
+                }
+                tree.BeginUpdate();
+                try { added += AddFolder(path, files); }
+                finally { tree.EndUpdate(); }
             }
+            else if (File.Exists(path) && AddPak(path, tree.Nodes) != null) added++;
         }
-        finally { tree.EndUpdate(); }
         status.Text = $"Opened {added} PAK files ({docs.Count} open).";
     }
 
-    private int AddFolder(string folder)
+    private static string[] ScanFolder(string folder) =>
+        Directory.EnumerateFiles(folder, "*.pak", new EnumerationOptions
+        {
+            RecurseSubdirectories = true, MatchCasing = MatchCasing.CaseInsensitive, IgnoreInaccessible = true,
+        }).OrderBy(f => f, StringComparer.OrdinalIgnoreCase).ToArray();
+
+    private int AddFolder(string folder, string[] files)
     {
-        string[] files;
-        try
-        {
-            files = Directory.EnumerateFiles(folder, "*.pak", new EnumerationOptions
-            {
-                RecurseSubdirectories = true, MatchCasing = MatchCasing.CaseInsensitive, IgnoreInaccessible = true,
-            }).OrderBy(f => f, StringComparer.OrdinalIgnoreCase).ToArray();
-        }
-        catch (Exception ex)
-        {
-            MessageBox.Show(this, ex.Message, "Cannot read folder", MessageBoxButtons.OK, MessageBoxIcon.Error);
-            return 0;
-        }
         if (files.Length == 0) { status.Text = "No .pak files under " + folder; return 0; }
         var root = new TreeNode(folder) { Tag = folder };
         tree.Nodes.Add(root);
@@ -246,25 +252,43 @@ public sealed class MainForm : Form
         return node;
     }
 
-    private void PopulatePak(TreeNode node)
+    // Loads the pak on a worker thread the first time its node is expanded, then lists its sheets.
+    private async void PopulatePak(TreeNode node)
     {
-        if (node.Tag is not PakDocument doc) return;
-        if (node.Nodes.Count == 1 && node.Nodes[0].Tag == null)
+        if (node.Tag is not PakDocument doc || node.Nodes.Count != 1 || node.Nodes[0].Tag != null) return;
+        if (!doc.IsLoaded)
         {
-            if (!doc.EnsureLoaded())
+            if (doc.Loading) return;
+            doc.Loading = true;
+            node.Nodes[0].Text = "loading...";
+            bool ok;
+            try { ok = await Task.Run(doc.EnsureLoaded); }
+            catch { ok = false; }
+            finally { doc.Loading = false; }
+            if (!docs.Contains(doc) || node.TreeView == null) return;   // closed meanwhile
+            if (!ok)
             {
                 // keep the placeholder so expanding again retries
+                node.Nodes[0].Text = "...";
+                node.Collapse();
                 node.Text = doc.Name + "  (cannot open)";
                 node.ToolTipText = doc.LoadError;
                 status.Text = $"{doc.Name}: {doc.LoadError}";
                 return;
             }
+        }
+        tree.BeginUpdate();
+        try
+        {
             node.Nodes.Clear();
             node.Text = doc.Name;
             node.ToolTipText = "";
-            for (int i = 0; i < doc.SheetCount; i++)
-                node.Nodes.Add(new TreeNode(DescribeSheet(doc, i)) { Tag = new SheetRef(doc, i) });
+            var nodes = new TreeNode[doc.SheetCount];
+            for (int i = 0; i < nodes.Length; i++) nodes[i] = new TreeNode(DescribeSheet(doc, i)) { Tag = new SheetRef(doc, i) };
+            node.Nodes.AddRange(nodes);
+            node.Expand();
         }
+        finally { tree.EndUpdate(); }
     }
 
     private static TreeNode? FindPakNode(TreeNodeCollection nodes, PakDocument doc)
@@ -286,7 +310,8 @@ public sealed class MainForm : Form
         {
             PAKLib.SpriteImage.TryGetSize(sprite.data, out int w, out int h);
             string k = sprite.ColorKey.HasValue ? "K " + (sprite.ColorKey.Value & 0xFFFFFF).ToString("X6") : "  ------";
-            return $" {i,3} {w,4}x{h,-4} {sprite.Rectangles.Count,3}f {k}";
+            string d = doc.KnownDrift.TryGetValue(i, out int drift) && drift > 0 ? " drift " + drift : "";
+            return $" {i,3} {w,4}x{h,-4} {sprite.Rectangles.Count,3}f {k}{d}";
         }
         string key = (s.KeyAuthored ? "K " : "  ") + s.Key.ToString("X6");
         string mark = s.Modified || s.KeyChanged ? "*" : " ";
@@ -308,7 +333,7 @@ public sealed class MainForm : Form
 
     private void OnTreeSelect(TreeNode? node)
     {
-        if (syncing || node == null) return;
+        if (node == null) return;
         if (node.Tag is PakDocument doc)
         {
             node.Expand();
@@ -318,26 +343,58 @@ public sealed class MainForm : Form
         if (node.Tag is SheetRef r) ShowSheet(r.Doc, r.Index);
     }
 
-    private void ShowSheet(PakDocument doc, int i)
+    // Decodes the sheet and counts its colours on a worker thread. While it runs, `current` is null so no edit can
+    // touch a sheet that is leaving the screen; if another sheet is picked meanwhile, this result is dropped.
+    private async void ShowSheet(PakDocument doc, int i)
     {
+        int version = ++showVersion;
+        ReleaseShownSheet();
         currentDoc = doc;
         sheetDoc = doc;
         currentIndex = i;
-        try { current = doc.Sheet(i); }
-        catch (Exception ex)
+        current = null;
+        var cached = doc.Sheets[i];
+        status.Text = $"Loading {doc.Name} sheet {i} ...";
+        SheetImage? s = null;
+        List<ColorStat> sorted = new();
+        string? error = null;
+        var task = Task.Run(() =>
         {
-            current = null;
-            status.Text = $"{doc.Name} sheet {i} cannot be decoded: {ex.Message}";
-        }
+            var img = cached ?? SheetImage.FromSprite(doc.Sprite(i));
+            return (img, SortColors(img));
+        });
+        showTask = task;
+        try { (s, sorted) = await task; }
+        catch (Exception ex) { error = ex.Message; }
+        if (version != showVersion || !docs.Contains(doc)) return;
+        // something else (Clear all sheets) may have stored this sheet meanwhile: that copy wins
+        var stored = doc.Sheets[i];
+        if (stored != null && stored != s) { s = stored; sorted = SortColors(s); error = null; }
+        else if (s != null) doc.Sheets[i] = s;
+        current = s;
         view.Highlight.Clear();
-        var rects = current == null
-            ? Enumerable.Empty<Rectangle>()
-            : doc.Sprite(i).Rectangles.Select(r => new Rectangle(r.x, r.y, r.width, r.height));
-        view.SetSheet(current, rects);
+        Rectangle[] rects;
+        try
+        {
+            rects = s == null ? Array.Empty<Rectangle>()
+                : doc.Sprite(i).Rectangles.Select(r => new Rectangle(r.x, r.y, r.width, r.height)).ToArray();
+        }
+        catch (Exception ex) { rects = Array.Empty<Rectangle>(); error = ex.Message; }
+        view.SetSheet(s, rects);
         RefreshNodes(doc, allSheets: false);
         RefreshKey();
-        RefreshColors();
+        ApplyColors(sorted);
         SelectionChanged();
+        status.Text = error != null || s == null
+            ? $"{doc.Name} sheet {i} cannot be decoded: {error}"
+            : $"{doc.Name} sheet {i}: {s.Width}x{s.Height}, {sorted.Count} colours besides the key.";
+    }
+
+    // Frees the sheet leaving the screen unless it holds unsaved edits.
+    private void ReleaseShownSheet()
+    {
+        if (sheetDoc == null || currentIndex < 0 || currentIndex >= sheetDoc.Sheets.Count) return;
+        sheetDoc.Release(currentIndex);
     }
 
     // ---------- saving and closing ----------
@@ -454,62 +511,62 @@ public sealed class MainForm : Form
 
     // ---------- colour selection (canvas and list) ----------
 
-    private void RefreshColors()
+    // The list is virtual: rows are built only as they scroll into view, so every colour is listed and switching
+    // sheets costs one count and sort, not thousands of list items.
+    private void RefreshColors() => ApplyColors(current == null ? new() : SortColors(current));
+
+    private static List<ColorStat> SortColors(SheetImage s) =>
+        s.CountColors().OrderBy(c => c.Distance).ThenByDescending(c => c.Outside).ToList();
+
+    private void ApplyColors(List<ColorStat> sorted)
     {
-        syncing = true;
-        colorList.BeginUpdate();
-        try { FillColorList(); }
-        finally { colorList.EndUpdate(); syncing = false; }
+        colorList.VirtualListSize = 0;   // shrink first so no row is requested past the new list
+        stats = sorted;
+        rowOf.Clear();
+        for (int i = 0; i < stats.Count; i++) rowOf[stats[i].Color] = i;
+        colorList.SelectedIndices.Clear();
+        colorList.VirtualListSize = stats.Count;
+        colorList.Invalidate();
     }
 
-    private void FillColorList()
+    private void OnRetrieveItem(RetrieveVirtualItemEventArgs e)
     {
-        colorList.Items.Clear();
-        stats = current?.CountColors().OrderBy(c => c.Distance).ThenByDescending(c => c.Outside).ToList() ?? new();
-        // a sheet can hold tens of thousands of colours; list the nearest ones, which is where drift lives,
-        // plus any selected colour further away
-        foreach (var c in stats.Take(2000).Concat(stats.Skip(2000).Where(c => view.Highlight.Contains(c.Color))))
-        {
-            var item = new ListViewItem($"{c.Color:X6}") { Tag = c.Color, UseItemStyleForSubItems = false };
-            item.BackColor = Color.FromArgb(c.Color | unchecked((int)0xFF000000));
-            item.ForeColor = (c.Color >> 16 & 0xFF) * 3 + (c.Color >> 8 & 0xFF) * 6 + (c.Color & 0xFF) > 1280 ? Color.Black : Color.White;
-            item.SubItems.Add(c.Distance.ToString());
-            item.SubItems.Add(c.SameIn565 ? "yes" : "");
-            item.SubItems.Add(c.Outside.ToString());
-            item.SubItems.Add(c.Inside.ToString());
-            item.Checked = view.Highlight.Contains(c.Color);
-            colorList.Items.Add(item);
-        }
+        if (e.ItemIndex >= stats.Count) { e.Item = new ListViewItem(""); return; }
+        var c = stats[e.ItemIndex];
+        bool on = view.Highlight.Contains(c.Color);
+        var item = new ListViewItem((on ? "[x] " : "[ ] ") + c.Color.ToString("X6")) { Tag = c.Color, UseItemStyleForSubItems = false };
+        item.BackColor = Color.FromArgb(c.Color | unchecked((int)0xFF000000));
+        item.ForeColor = (c.Color >> 16 & 0xFF) * 3 + (c.Color >> 8 & 0xFF) * 6 + (c.Color & 0xFF) > 1280 ? Color.Black : Color.White;
+        item.SubItems.Add(c.Distance.ToString());
+        item.SubItems.Add(c.SameIn565 ? "yes" : "");
+        item.SubItems.Add(c.Outside.ToString());
+        item.SubItems.Add(c.Inside.ToString());
+        e.Item = item;
     }
 
-    // List -> canvas
-    private void OnColorChecked(ListViewItem item)
+    // List -> canvas: a click toggles the row's colour (a double-click toggles twice, then centres on it).
+    private void OnColorListClick(MouseEventArgs e)
     {
-        if (syncing || item.Tag is not int color) return;
-        if (item.Checked) view.Highlight.Add(color); else view.Highlight.Remove(color);
+        if (e.Button != MouseButtons.Left) return;
+        var hit = colorList.HitTest(e.Location).Item;
+        if (hit == null || hit.Index >= stats.Count) return;
+        int color = stats[hit.Index].Color;
+        if (!view.Highlight.Add(color)) view.Highlight.Remove(color);
+        colorList.RedrawItems(hit.Index, hit.Index, false);
         view.Rebuild();
         SelectionChanged();
     }
 
-    // Canvas -> list: sync the check box of a colour (adding a row if it is beyond the list cap).
+    // Canvas -> list: redraw the colour's row and bring it into view.
     private void SyncCheck(int color)
     {
-        bool listed = false;
-        syncing = true;
-        try
+        if (rowOf.TryGetValue(color, out int row))
         {
-            foreach (ListViewItem item in colorList.Items)
-                if (item.Tag is int c && c == color)
-                {
-                    item.Checked = view.Highlight.Contains(c);
-                    item.EnsureVisible();
-                    item.Selected = true;
-                    listed = true;
-                    break;
-                }
+            colorList.RedrawItems(row, row, false);
+            colorList.EnsureVisible(row);
+            colorList.SelectedIndices.Clear();
+            colorList.SelectedIndices.Add(row);
         }
-        finally { syncing = false; }
-        if (!listed && view.Highlight.Contains(color)) RefreshColors();
         view.Rebuild();
         SelectionChanged();
     }
@@ -536,7 +593,8 @@ public sealed class MainForm : Form
     // Double-click a list row: centre the canvas on the first pixel of that colour.
     private void CenterOnSelectedColor()
     {
-        if (current == null || colorList.SelectedItems.Count == 0 || colorList.SelectedItems[0].Tag is not int color) return;
+        if (current == null || colorList.SelectedIndices.Count == 0 || colorList.SelectedIndices[0] >= stats.Count) return;
+        int color = stats[colorList.SelectedIndices[0]].Color;
         int i = Array.IndexOf(current.Pixels, color);
         if (i < 0) return;
         view.CenterOn(i % current.Width, i / current.Width);
@@ -573,10 +631,12 @@ public sealed class MainForm : Form
         status.Text = "Sheet reverted to its pixels and key as opened or last saved.";
     }
 
-    private void ClearAllSheets()
+    // Sheets are independent, so they are processed in parallel on worker threads; the window is disabled meanwhile
+    // because the sheet on screen may be one of them. Sheets left unchanged are released again.
+    private async void ClearAllSheets()
     {
         var doc = currentDoc;
-        if (doc == null || !doc.EnsureLoaded() || doc.SheetCount == 0) return;
+        if (doc == null || !doc.IsLoaded || doc.SheetCount == 0) return;
         if (MessageBox.Show(this,
                 $"For every sheet of {doc.Name}: set the key to its first pixel and clear everything outside the frames to it.\n" +
                 "This replaces any key already authored on those sheets.\n" +
@@ -584,27 +644,42 @@ public sealed class MainForm : Form
                 MessageBoxButtons.OKCancel) != DialogResult.OK) return;
         int done = 0, skipped = 0;
         long pixels = 0;
-        Cursor = Cursors.WaitCursor;
+        Enabled = false;
+        UseWaitCursor = true;
+        status.Text = $"Clearing {doc.SheetCount} sheets of {doc.Name} ...";
+        // let a running decode finish (it may be reading a sheet about to be edited), and drop its result:
+        // the sheet is shown again afterwards
+        showVersion++;
+        if (showTask != null) try { await showTask; } catch { }
+        int shown = doc == sheetDoc ? currentIndex : -1;
+        string? error = null;
         try
         {
-            for (int i = 0; i < doc.SheetCount; i++)
+            await Task.Run(() => Parallel.For(0, doc.SheetCount, i =>
             {
                 SheetImage s;
-                try { s = doc.Sheet(i); } catch { skipped++; continue; }
-                if (s.InFrame.Length == 0 || s.InFrame[0]) { skipped++; continue; }
+                try { s = doc.Sheets[i] ?? SheetImage.FromSprite(doc.Sprite(i)); }
+                catch { Interlocked.Increment(ref skipped); return; }
+                if (s.InFrame.Length == 0 || s.InFrame[0]) { Interlocked.Increment(ref skipped); return; }
                 if (s.Key != s.FirstPixel) { s.Key = s.FirstPixel; s.KeyAuthored = true; s.UpdateDrift(); }
                 int n = s.ClearOutsideFrames();
                 if (n > 0) s.KeyAuthored = true;
-                pixels += n;
-                done++;
-            }
+                Interlocked.Add(ref pixels, n);
+                Interlocked.Increment(ref done);
+                // each index is written by one worker only; the list never resizes
+                doc.Sheets[i] = s;
+                if (i != shown) doc.Release(i);
+            }));
         }
-        finally { Cursor = Cursors.Default; }
+        catch (Exception ex) { error = (ex as AggregateException)?.InnerException?.Message ?? ex.Message; }
+        finally { Enabled = true; UseWaitCursor = false; }
         view.Highlight.Clear();
-        if (doc == sheetDoc && current != null) { view.Rebuild(); RefreshKey(); RefreshColors(); }
+        if (shown >= 0 && current == null) ShowSheet(doc, shown);   // its decode was dropped above
+        else if (doc == sheetDoc && current != null) { view.Rebuild(); RefreshKey(); RefreshColors(); }
         RefreshNodes(doc, allSheets: true);
         SelectionChanged();
-        status.Text = $"{doc.Name}: cleared {pixels} pixels on {done} sheets; skipped {skipped}.";
+        status.Text = $"{doc.Name}: cleared {pixels} pixels on {done} sheets; skipped {skipped}." +
+            (error != null ? " Stopped by an error: " + error : "");
     }
 
     // ---------- canvas input ----------

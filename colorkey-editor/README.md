@@ -27,7 +27,8 @@ ColorKeyEditor.exe [file.pak | folder] ...
   over, Ctrl+drag to remove them. The colour list follows. **Canvas click picks key colour**: click to make it the
   key. Or pick the key with *First pixel* / *Choose...*.
 - Double-click a colour in the list to centre the canvas on its first pixel.
-- The colour list shows the nearest colours to the key (up to 2000): distance (largest channel difference),
+- The colour list shows every colour, nearest to the key first; click a row to select or deselect it (`[x]`):
+  distance (largest channel difference),
   whether it is already the key in RGB565 (`565 = key`, so already transparent in game), and how many pixels are
   outside and inside frames. *Select within N* selects every colour within distance N.
 - **Replace selected colours with key** recolours every pixel of those colours on the sheet, inside frames too.
