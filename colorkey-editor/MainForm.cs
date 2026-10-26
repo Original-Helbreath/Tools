@@ -1,46 +1,45 @@
-using PAKLib;
-
 namespace ColorKeyEditor;
 
 public sealed class MainForm : Form
 {
-    private PAK? pak;
-    private string? pakPath;
-    private readonly List<SheetImage?> sheets = new();   // decoded on first use
+    private sealed record SheetRef(PakDocument Doc, int Index);
+
+    private readonly List<PakDocument> docs = new();
+    private PakDocument? currentDoc;   // pak selected in the tree (Save, Close, PAK menu)
+    private PakDocument? sheetDoc;     // pak that owns the sheet on the canvas
     private SheetImage? current;
     private int currentIndex = -1;
-    private bool dirty;
     private bool syncing;
+    private List<ColorStat> stats = new();
 
-    private readonly Font listFont = new("Consolas", 9f);
-    private readonly ListBox sheetList = new() { Dock = DockStyle.Fill, IntegralHeight = false };
-    private readonly Panel viewPanel = new() { Dock = DockStyle.Fill, AutoScroll = true, BackColor = Color.FromArgb(40, 40, 40) };
-    private readonly SheetView view = new() { Location = new Point(0, 0) };
+    private readonly Font treeFont = new("Consolas", 9f);
+    private readonly TreeView tree = new() { Dock = DockStyle.Fill, HideSelection = false };
+    private readonly SheetView view = new() { Dock = DockStyle.Fill };
     private readonly Panel keySwatch = new() { Size = new Size(40, 22), BorderStyle = BorderStyle.FixedSingle };
-    private readonly Label keyLabel = new() { AutoSize = true };
+    private readonly Label keyLabel = new() { AutoSize = true, Margin = new Padding(3, 6, 3, 0) };
     private readonly CheckBox keyViewBox = new() { Text = "Transparency key view", AutoSize = true };
     private readonly CheckBox framesBox = new() { Text = "Show frames", AutoSize = true, Checked = true };
-    private readonly NumericUpDown zoomBox = new() { Minimum = 1, Maximum = 16, Value = 2, Width = 50 };
-    private readonly RadioButton modeDrift = new() { Text = "Click toggles drift colour", AutoSize = true, Checked = true };
-    private readonly RadioButton modeKey = new() { Text = "Click picks key colour", AutoSize = true };
+    private readonly RadioButton modeDrift = new() { Text = "Canvas click selects colour", AutoSize = true, Checked = true };
+    private readonly RadioButton modeKey = new() { Text = "Canvas click picks key colour", AutoSize = true };
     private readonly NumericUpDown distanceBox = new() { Minimum = 0, Maximum = 255, Value = 24, Width = 55 };
+    private readonly Label selectedLabel = new() { AutoSize = true, Margin = new Padding(3, 6, 3, 0) };
     private readonly ListView colorList = new()
     {
         View = View.Details, CheckBoxes = true, FullRowSelect = true, Dock = DockStyle.Fill, HideSelection = false,
     };
     private readonly ToolStripStatusLabel status = new() { Spring = true, TextAlign = ContentAlignment.MiddleLeft };
-    private readonly ToolStripStatusLabel hover = new() { AutoSize = false, Width = 380, TextAlign = ContentAlignment.MiddleLeft };
-    private List<ColorStat> stats = new();
+    private readonly ToolStripStatusLabel hover = new() { AutoSize = false, Width = 360, TextAlign = ContentAlignment.MiddleLeft };
+    private readonly ToolStripStatusLabel zoomLabel = new() { AutoSize = false, Width = 70 };
 
-    public MainForm(string? openPath)
+    public MainForm(string[] openPaths)
     {
         Text = "Colour Key Editor";
-        Size = new Size(1400, 900);
+        Size = new Size(1500, 950);
         StartPosition = FormStartPosition.CenterScreen;
-        KeyPreview = true;
-        sheetList.Font = listFont;
+        AllowDrop = true;
+        tree.Font = treeFont;
         BuildLayout();
-        if (openPath != null) Shown += (_, _) => OpenPak(Path.GetFullPath(openPath));
+        if (openPaths.Length > 0) Shown += (_, _) => OpenPaths(openPaths);
     }
 
     // ---------- layout ----------
@@ -49,30 +48,40 @@ public sealed class MainForm : Form
     {
         var menu = new MenuStrip();
         var file = new ToolStripMenuItem("&File");
-        file.DropDownItems.Add(new ToolStripMenuItem("&Open PAK...", null, (_, _) => OpenDialog(), Keys.Control | Keys.O));
-        file.DropDownItems.Add(new ToolStripMenuItem("&Save", null, (_, _) => Save(pakPath), Keys.Control | Keys.S));
-        file.DropDownItems.Add("Save &As...", null, (_, _) => SaveAs());
+        file.DropDownItems.Add(new ToolStripMenuItem("&Open PAK files...", null, (_, _) => OpenFilesDialog(), Keys.Control | Keys.O));
+        file.DropDownItems.Add(new ToolStripMenuItem("Open &Folder...", null, (_, _) => OpenFolderDialog(), Keys.Control | Keys.Shift | Keys.O));
         file.DropDownItems.Add(new ToolStripSeparator());
-        file.DropDownItems.Add("E&xit", null, (_, _) => Close());
+        file.DropDownItems.Add(new ToolStripMenuItem("&Save PAK", null, (_, _) => SaveDoc(currentDoc, null), Keys.Control | Keys.S));
+        file.DropDownItems.Add(new ToolStripMenuItem("Save PAK &As...", null, (_, _) => SaveAs()));
+        file.DropDownItems.Add(new ToolStripMenuItem("Save A&ll", null, (_, _) => SaveAll(), Keys.Control | Keys.Shift | Keys.S));
+        file.DropDownItems.Add(new ToolStripSeparator());
+        file.DropDownItems.Add(new ToolStripMenuItem("&Close PAK", null, (_, _) => CloseDoc(currentDoc)));
+        file.DropDownItems.Add(new ToolStripMenuItem("Close A&ll", null, (_, _) => CloseAll()));
+        file.DropDownItems.Add(new ToolStripSeparator());
+        file.DropDownItems.Add(new ToolStripMenuItem("E&xit", null, (_, _) => Close()));
+
+        var viewMenu = new ToolStripMenuItem("&View");
+        viewMenu.DropDownItems.Add(new ToolStripMenuItem("&Fit to window (F)", null, (_, _) => view.FitToView()));
+        viewMenu.DropDownItems.Add(new ToolStripMenuItem("&Actual size (1)", null, (_, _) => view.ActualSize()));
+        viewMenu.DropDownItems.Add(new ToolStripMenuItem("Zoom &in (+)", null, (_, _) => view.ZoomBy(1.25f)));
+        viewMenu.DropDownItems.Add(new ToolStripMenuItem("Zoom &out (-)", null, (_, _) => view.ZoomBy(0.8f)));
+
         var pakMenu = new ToolStripMenuItem("&PAK");
-        pakMenu.DropDownItems.Add("Clear outside frames on every sheet (key = first pixel)...", null, (_, _) => ClearAllSheets());
-        menu.Items.Add(file);
-        menu.Items.Add(pakMenu);
+        pakMenu.DropDownItems.Add("Clear outside frames on every sheet of this PAK (key = first pixel)...", null, (_, _) => ClearAllSheets());
+
+        menu.Items.AddRange(new ToolStripItem[] { file, viewMenu, pakMenu });
 
         var statusStrip = new StatusStrip();
-        statusStrip.Items.Add(status);
-        statusStrip.Items.Add(hover);
+        statusStrip.Items.AddRange(new ToolStripItem[] { status, hover, zoomLabel });
 
         // right-hand panel
         var side = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 1, Padding = new Padding(6) };
-        side.RowStyles.Add(new RowStyle(SizeType.AutoSize));
-        side.RowStyles.Add(new RowStyle(SizeType.AutoSize));
-        side.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+        for (int i = 0; i < 4; i++) side.RowStyles.Add(new RowStyle(SizeType.AutoSize));
         side.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
         side.RowStyles.Add(new RowStyle(SizeType.AutoSize));
 
         var keyGroup = new GroupBox { Text = "Transparency key", Dock = DockStyle.Top, AutoSize = true };
-        var keyFlow = new FlowLayoutPanel { Dock = DockStyle.Fill, AutoSize = true, WrapContents = true };
+        var keyFlow = new FlowLayoutPanel { Dock = DockStyle.Fill, AutoSize = true };
         var firstPixel = new Button { Text = "First pixel", AutoSize = true };
         var chooseKey = new Button { Text = "Choose...", AutoSize = true };
         firstPixel.Click += (_, _) => { if (current != null) SetKey(current.FirstPixel); };
@@ -80,27 +89,34 @@ public sealed class MainForm : Form
         keyFlow.Controls.AddRange(new Control[] { keySwatch, keyLabel, firstPixel, chooseKey });
         keyGroup.Controls.Add(keyFlow);
 
-        var viewGroup = new GroupBox { Text = "View", Dock = DockStyle.Top, AutoSize = true };
+        var viewGroup = new GroupBox { Text = "Canvas", Dock = DockStyle.Top, AutoSize = true };
         var viewFlow = new FlowLayoutPanel { Dock = DockStyle.Fill, AutoSize = true, FlowDirection = FlowDirection.TopDown };
-        var zoomRow = new FlowLayoutPanel { AutoSize = true };
-        zoomRow.Controls.Add(new Label { Text = "Zoom", AutoSize = true, Margin = new Padding(0, 6, 0, 0) });
-        zoomRow.Controls.Add(zoomBox);
-        viewFlow.Controls.AddRange(new Control[] { keyViewBox, framesBox, zoomRow, modeDrift, modeKey });
+        var help = new Label
+        {
+            AutoSize = true, ForeColor = SystemColors.GrayText,
+            Text = "Wheel: zoom   Middle/right drag or Space+drag: pan\nF: fit   1: actual size\n" +
+                   "Click: toggle colour   Drag: add colours   Ctrl+drag: remove",
+        };
+        viewFlow.Controls.AddRange(new Control[] { keyViewBox, framesBox, modeDrift, modeKey, help });
         viewGroup.Controls.Add(viewFlow);
 
-        var driftRow = new FlowLayoutPanel { Dock = DockStyle.Top, AutoSize = true };
+        var selectRow = new FlowLayoutPanel { Dock = DockStyle.Top, AutoSize = true };
         var selectNear = new Button { Text = "Select within", AutoSize = true };
         var selectNone = new Button { Text = "Select none", AutoSize = true };
         selectNear.Click += (_, _) => SelectWithinDistance();
-        selectNone.Click += (_, _) => SetAllChecks(false);
-        driftRow.Controls.AddRange(new Control[] { selectNear, distanceBox, new Label { Text = "of key", AutoSize = true, Margin = new Padding(0, 6, 0, 0) }, selectNone });
+        selectNone.Click += (_, _) => { view.Highlight.Clear(); RefreshColors(); view.Rebuild(); SelectionChanged(); };
+        selectRow.Controls.AddRange(new Control[]
+        {
+            selectNear, distanceBox, new Label { Text = "of key", AutoSize = true, Margin = new Padding(0, 6, 0, 0) }, selectNone,
+        });
 
-        colorList.Columns.Add("Colour", 90);
+        colorList.Columns.Add("Colour", 85);
         colorList.Columns.Add("Dist", 45, HorizontalAlignment.Right);
-        colorList.Columns.Add("565 = key", 70);
-        colorList.Columns.Add("Outside", 65, HorizontalAlignment.Right);
-        colorList.Columns.Add("Inside", 65, HorizontalAlignment.Right);
+        colorList.Columns.Add("565=key", 60);
+        colorList.Columns.Add("Outside", 62, HorizontalAlignment.Right);
+        colorList.Columns.Add("Inside", 62, HorizontalAlignment.Right);
         colorList.ItemChecked += (_, e) => OnColorChecked(e.Item);
+        colorList.ItemActivate += (_, _) => CenterOnSelectedColor();
 
         var actions = new FlowLayoutPanel { Dock = DockStyle.Top, AutoSize = true, FlowDirection = FlowDirection.TopDown };
         var replace = new Button { Text = "Replace selected colours with key", AutoSize = true };
@@ -113,17 +129,16 @@ public sealed class MainForm : Form
 
         side.Controls.Add(keyGroup, 0, 0);
         side.Controls.Add(viewGroup, 0, 1);
-        side.Controls.Add(driftRow, 0, 2);
-        side.Controls.Add(colorList, 0, 3);
-        side.Controls.Add(actions, 0, 4);
-
-        viewPanel.Controls.Add(view);
+        side.Controls.Add(selectRow, 0, 2);
+        side.Controls.Add(selectedLabel, 0, 3);
+        side.Controls.Add(colorList, 0, 4);
+        side.Controls.Add(actions, 0, 5);
 
         var inner = new SplitContainer { Dock = DockStyle.Fill, FixedPanel = FixedPanel.Panel2 };
-        inner.Panel1.Controls.Add(viewPanel);
+        inner.Panel1.Controls.Add(view);
         inner.Panel2.Controls.Add(side);
         var outer = new SplitContainer { Dock = DockStyle.Fill, FixedPanel = FixedPanel.Panel1 };
-        outer.Panel1.Controls.Add(sheetList);
+        outer.Panel1.Controls.Add(tree);
         outer.Panel2.Controls.Add(inner);
 
         Controls.Add(outer);
@@ -133,118 +148,143 @@ public sealed class MainForm : Form
 
         Load += (_, _) =>
         {
-            outer.SplitterDistance = 300;
+            outer.SplitterDistance = 340;
             inner.SplitterDistance = Math.Max(200, inner.Width - 380);
         };
 
-        sheetList.SelectedIndexChanged += (_, _) => ShowSheet(sheetList.SelectedIndex);
+        tree.BeforeExpand += (_, e) => { if (e.Node != null) PopulatePak(e.Node); };
+        tree.AfterSelect += (_, e) => OnTreeSelect(e.Node);
         keyViewBox.CheckedChanged += (_, _) => { view.KeyView = keyViewBox.Checked; view.Rebuild(); };
         framesBox.CheckedChanged += (_, _) => { view.ShowFrames = framesBox.Checked; view.Invalidate(); };
-        zoomBox.ValueChanged += (_, _) => view.SetZoom((int)zoomBox.Value);
-        view.SetZoom((int)zoomBox.Value);
         view.PixelHovered += OnHover;
         view.PixelClicked += OnPixelClicked;
-        FormClosing += (_, e) => { if (!ConfirmDiscard()) e.Cancel = true; };
+        view.PixelDragged += OnPixelDragged;
+        view.ZoomChanged += () => zoomLabel.Text = $"{view.Zoom * 100:0}%";
+        DragEnter += (_, e) => e.Effect = e.Data?.GetDataPresent(DataFormats.FileDrop) == true ? DragDropEffects.Copy : DragDropEffects.None;
+        DragDrop += (_, e) => { if (e.Data?.GetData(DataFormats.FileDrop) is string[] paths) OpenPaths(paths); };
+        FormClosing += (_, e) => { if (!ConfirmDiscard(docs.Where(d => d.Dirty))) e.Cancel = true; };
+        SelectionChanged();
     }
 
-    // ---------- file ----------
+    // ---------- opening ----------
 
-    private void OpenDialog()
+    private void OpenFilesDialog()
     {
-        if (!ConfirmDiscard()) return;
-        using var dlg = new OpenFileDialog { Filter = "PAK files (*.pak)|*.pak|All files|*.*" };
-        if (dlg.ShowDialog(this) == DialogResult.OK) OpenPak(dlg.FileName);
+        using var dlg = new OpenFileDialog { Filter = "PAK files (*.pak)|*.pak|All files|*.*", Multiselect = true };
+        if (dlg.ShowDialog(this) == DialogResult.OK) OpenPaths(dlg.FileNames);
     }
 
-    private void OpenPak(string path)
+    private void OpenFolderDialog()
     {
+        using var dlg = new FolderBrowserDialog { Description = "Open every .pak in this folder and its subfolders" };
+        if (dlg.ShowDialog(this) == DialogResult.OK) OpenPaths(new[] { dlg.SelectedPath });
+    }
+
+    // Files open as PAK nodes; folders open as a tree of every .pak below them.
+    private void OpenPaths(IEnumerable<string> paths)
+    {
+        int added = 0;
+        tree.BeginUpdate();
         try
         {
-            var loaded = PAK.ReadFromFile(path);
-            if (loaded.Data == null) throw new InvalidDataException("No PAK data.");
-            pak = loaded;
-            pakPath = path;
-            sheets.Clear();
-            sheets.AddRange(Enumerable.Repeat<SheetImage?>(null, loaded.Data.Sprites.Count));
-            current = null;
-            currentIndex = -1;
-            dirty = false;
-            RefreshSheetList();
-            Text = "Colour Key Editor - " + Path.GetFileName(path);
-            if (sheets.Count > 0) sheetList.SelectedIndex = 0; else ShowSheet(-1);
-            status.Text = $"Opened {path}: {sheets.Count} sheets.";
-        }
-        catch (Exception ex)
-        {
-            MessageBox.Show(this, ex.Message, "Cannot open PAK", MessageBoxButtons.OK, MessageBoxIcon.Error);
-        }
-    }
-
-    private void SaveAs()
-    {
-        if (pak == null) return;
-        using var dlg = new SaveFileDialog { Filter = "PAK files (*.pak)|*.pak", FileName = Path.GetFileName(pakPath) };
-        if (dlg.ShowDialog(this) == DialogResult.OK) Save(dlg.FileName);
-    }
-
-    private void Save(string? path)
-    {
-        if (pak?.Data == null || path == null) return;
-        try
-        {
-            for (int i = 0; i < sheets.Count; i++)
+            foreach (var raw in paths)
             {
-                var s = sheets[i];
-                if (s == null) continue;   // never opened: written as loaded
-                var sprite = pak.Data.Sprites[i];
-                if (s.Modified) sprite.data = s.ToBmp24();
-                if (s.KeyChanged)
-                {
-                    if (s.KeyAuthored) sprite.SetColorKey((byte)(s.Key >> 16), (byte)(s.Key >> 8), (byte)s.Key);
-                    else sprite.ClearColorKey();
-                }
+                string path = Path.GetFullPath(raw);
+                if (Directory.Exists(path)) added += AddFolder(path);
+                else if (File.Exists(path) && AddPak(path, tree.Nodes) != null) added++;
             }
-            PAK.SaveToFile(pak, path);
-            foreach (var s in sheets) s?.MarkSaved();
-            RefreshSheetList();
-            pakPath = path;
-            dirty = false;
-            Text = "Colour Key Editor - " + Path.GetFileName(path);
-            status.Text = "Saved " + path;
+        }
+        finally { tree.EndUpdate(); }
+        status.Text = $"Opened {added} PAK files ({docs.Count} open).";
+    }
+
+    private int AddFolder(string folder)
+    {
+        string[] files;
+        try
+        {
+            files = Directory.EnumerateFiles(folder, "*.pak", new EnumerationOptions
+            {
+                RecurseSubdirectories = true, MatchCasing = MatchCasing.CaseInsensitive, IgnoreInaccessible = true,
+            }).OrderBy(f => f, StringComparer.OrdinalIgnoreCase).ToArray();
         }
         catch (Exception ex)
         {
-            MessageBox.Show(this, ex.Message, "Cannot save PAK", MessageBoxButtons.OK, MessageBoxIcon.Error);
+            MessageBox.Show(this, ex.Message, "Cannot read folder", MessageBoxButtons.OK, MessageBoxIcon.Error);
+            return 0;
         }
-    }
-
-    private bool ConfirmDiscard()
-    {
-        if (!dirty) return true;
-        return MessageBox.Show(this, "Discard unsaved changes?", "Colour Key Editor", MessageBoxButtons.YesNo,
-            MessageBoxIcon.Warning) == DialogResult.Yes;
-    }
-
-    // ---------- sheets ----------
-
-    private SheetImage? Sheet(int i)
-    {
-        if (i < 0 || i >= sheets.Count) return null;
-        try { return sheets[i] ??= SheetImage.FromSprite(pak!.Data!.Sprites[i]); }
-        catch (Exception ex)
+        if (files.Length == 0) { status.Text = "No .pak files under " + folder; return 0; }
+        var root = new TreeNode(folder) { Tag = folder };
+        tree.Nodes.Add(root);
+        int added = 0;
+        foreach (var f in files)
         {
-            status.Text = $"Sheet {i} cannot be decoded: {ex.Message}";
-            return null;
+            // folder nodes for each subdirectory between the root and the file
+            var parent = root;
+            string rel = Path.GetRelativePath(folder, Path.GetDirectoryName(f)!);
+            if (rel != ".")
+                foreach (var part in rel.Split(Path.DirectorySeparatorChar))
+                {
+                    var next = parent.Nodes.Cast<TreeNode>().FirstOrDefault(n => n.Tag is string && n.Text == part);
+                    if (next == null) { next = new TreeNode(part) { Tag = Path.Combine((string)parent.Tag!, part) }; parent.Nodes.Add(next); }
+                    parent = next;
+                }
+            if (AddPak(f, parent.Nodes) != null) added++;
+        }
+        if (root.Nodes.Count == 0) root.Remove(); else root.Expand();
+        return added;
+    }
+
+    private TreeNode? AddPak(string path, TreeNodeCollection into)
+    {
+        if (docs.Any(d => string.Equals(d.Path, path, StringComparison.OrdinalIgnoreCase))) return null;
+        var doc = new PakDocument(path);
+        docs.Add(doc);
+        var node = new TreeNode(doc.Name) { Tag = doc };
+        node.Nodes.Add(new TreeNode("...") { Tag = null });   // placeholder until expanded
+        into.Add(node);
+        return node;
+    }
+
+    private void PopulatePak(TreeNode node)
+    {
+        if (node.Tag is not PakDocument doc) return;
+        if (node.Nodes.Count == 1 && node.Nodes[0].Tag == null)
+        {
+            if (!doc.EnsureLoaded())
+            {
+                // keep the placeholder so expanding again retries
+                node.Text = doc.Name + "  (cannot open)";
+                node.ToolTipText = doc.LoadError;
+                status.Text = $"{doc.Name}: {doc.LoadError}";
+                return;
+            }
+            node.Nodes.Clear();
+            node.Text = doc.Name;
+            node.ToolTipText = "";
+            for (int i = 0; i < doc.SheetCount; i++)
+                node.Nodes.Add(new TreeNode(DescribeSheet(doc, i)) { Tag = new SheetRef(doc, i) });
         }
     }
 
-    private string Describe(int i)
+    private static TreeNode? FindPakNode(TreeNodeCollection nodes, PakDocument doc)
     {
-        var sprite = pak!.Data!.Sprites[i];
-        var s = sheets[i];
+        foreach (TreeNode n in nodes)
+        {
+            if (n.Tag == doc) return n;
+            var found = FindPakNode(n.Nodes, doc);
+            if (found != null) return found;
+        }
+        return null;
+    }
+
+    private static string DescribeSheet(PakDocument doc, int i)
+    {
+        var sprite = doc.Sprite(i);
+        var s = doc.Sheets[i];
         if (s == null)
         {
-            SpriteImage.TryGetSize(sprite.data, out int w, out int h);
+            PAKLib.SpriteImage.TryGetSize(sprite.data, out int w, out int h);
             string k = sprite.ColorKey.HasValue ? "K " + (sprite.ColorKey.Value & 0xFFFFFF).ToString("X6") : "  ------";
             return $" {i,3} {w,4}x{h,-4} {sprite.Rectangles.Count,3}f {k}";
         }
@@ -253,51 +293,137 @@ public sealed class MainForm : Form
         return $"{mark}{i,3} {s.Width,4}x{s.Height,-4} {sprite.Rectangles.Count,3}f {key} {(s.DriftOutside > 0 ? "drift " + s.DriftOutside : "")}";
     }
 
-    private void RefreshSheetList()
+    private void RefreshNodes(PakDocument doc, bool allSheets)
     {
-        int sel = sheetList.SelectedIndex;
-        syncing = true;
-        try
+        var node = FindPakNode(tree.Nodes, doc);
+        if (node == null) return;
+        node.Text = doc.Name + (doc.Dirty ? " *" : "");
+        if (!doc.IsLoaded) return;
+        foreach (TreeNode child in node.Nodes)
+            if (child.Tag is SheetRef r && (allSheets || (doc == sheetDoc && r.Index == currentIndex)))
+                child.Text = DescribeSheet(doc, r.Index);
+    }
+
+    // ---------- selection in the tree ----------
+
+    private void OnTreeSelect(TreeNode? node)
+    {
+        if (syncing || node == null) return;
+        if (node.Tag is PakDocument doc)
         {
-            sheetList.BeginUpdate();
-            sheetList.Items.Clear();
-            for (int i = 0; i < sheets.Count; i++) sheetList.Items.Add(Describe(i));
-            sheetList.EndUpdate();
-            if (sel >= 0 && sel < sheets.Count) sheetList.SelectedIndex = sel;
+            node.Expand();
+            currentDoc = doc;
+            return;
         }
-        finally { syncing = false; }
+        if (node.Tag is SheetRef r) ShowSheet(r.Doc, r.Index);
     }
 
-    private void RefreshSheetRow(int i)
+    private void ShowSheet(PakDocument doc, int i)
     {
-        if (i < 0 || i >= sheetList.Items.Count) return;
-        syncing = true;
-        try { sheetList.Items[i] = Describe(i); }
-        finally { syncing = false; }
-    }
-
-    private void ShowSheet(int i)
-    {
-        if (syncing || i == currentIndex && current != null && i >= 0) return;
+        currentDoc = doc;
+        sheetDoc = doc;
         currentIndex = i;
-        current = Sheet(i);
+        try { current = doc.Sheet(i); }
+        catch (Exception ex)
+        {
+            current = null;
+            status.Text = $"{doc.Name} sheet {i} cannot be decoded: {ex.Message}";
+        }
         view.Highlight.Clear();
-        RefreshSheetRow(i);
         var rects = current == null
             ? Enumerable.Empty<Rectangle>()
-            : pak!.Data!.Sprites[i].Rectangles.Select(r => new Rectangle(r.x, r.y, r.width, r.height));
+            : doc.Sprite(i).Rectangles.Select(r => new Rectangle(r.x, r.y, r.width, r.height));
         view.SetSheet(current, rects);
+        RefreshNodes(doc, allSheets: false);
         RefreshKey();
         RefreshColors();
+        SelectionChanged();
+    }
+
+    // ---------- saving and closing ----------
+
+    private void SaveDoc(PakDocument? doc, string? path)
+    {
+        if (doc == null || !doc.IsLoaded) return;
+        try
+        {
+            doc.Save(path ?? doc.Path);
+            RefreshNodes(doc, allSheets: true);
+            RefreshKey();
+            status.Text = "Saved " + doc.Path;
+        }
+        catch (Exception ex)
+        {
+            MessageBox.Show(this, ex.Message, "Cannot save " + doc.Name, MessageBoxButtons.OK, MessageBoxIcon.Error);
+        }
+    }
+
+    private void SaveAs()
+    {
+        if (currentDoc == null || !currentDoc.IsLoaded) return;
+        using var dlg = new SaveFileDialog { Filter = "PAK files (*.pak)|*.pak", FileName = currentDoc.Name };
+        if (dlg.ShowDialog(this) == DialogResult.OK) SaveDoc(currentDoc, dlg.FileName);
+    }
+
+    private void SaveAll()
+    {
+        foreach (var d in docs.Where(d => d.Dirty).ToList()) SaveDoc(d, null);
+    }
+
+    private bool ConfirmDiscard(IEnumerable<PakDocument> dirty)
+    {
+        var names = dirty.Select(d => d.Name).ToList();
+        if (names.Count == 0) return true;
+        return MessageBox.Show(this, "Discard unsaved changes in:\n" + string.Join("\n", names.Take(20)) +
+            (names.Count > 20 ? $"\n... and {names.Count - 20} more" : ""), "Colour Key Editor",
+            MessageBoxButtons.YesNo, MessageBoxIcon.Warning) == DialogResult.Yes;
+    }
+
+    private void CloseDoc(PakDocument? doc)
+    {
+        if (doc == null || !ConfirmDiscard(doc.Dirty ? new[] { doc } : Array.Empty<PakDocument>())) return;
+        if (sheetDoc == doc) ClearView();
+        if (currentDoc == doc) currentDoc = null;
+        var node = FindPakNode(tree.Nodes, doc);
+        docs.Remove(doc);
+        if (node != null)
+        {
+            var parent = node.Parent;
+            node.Remove();
+            // drop folder nodes left empty
+            while (parent != null && parent.Nodes.Count == 0) { var up = parent.Parent; parent.Remove(); parent = up; }
+        }
+    }
+
+    private void CloseAll()
+    {
+        if (!ConfirmDiscard(docs.Where(d => d.Dirty))) return;
+        docs.Clear();
+        tree.Nodes.Clear();
+        ClearView();
+    }
+
+    private void ClearView()
+    {
+        currentDoc = null;
+        sheetDoc = null;
+        current = null;
+        currentIndex = -1;
+        view.Highlight.Clear();
+        view.SetSheet(null, Array.Empty<Rectangle>());
+        RefreshKey();
+        RefreshColors();
+        SelectionChanged();
     }
 
     private void Changed()
     {
-        dirty = true;
+        if (sheetDoc == null) return;
         view.Rebuild();
         RefreshKey();
         RefreshColors();
-        RefreshSheetRow(currentIndex);
+        RefreshNodes(sheetDoc, allSheets: false);
+        SelectionChanged();
     }
 
     // ---------- key ----------
@@ -314,6 +440,7 @@ public sealed class MainForm : Form
         if (current == null) return;
         current.Key = key & 0xFFFFFF;
         current.KeyAuthored = true;
+        current.UpdateDrift();
         view.Highlight.Clear();
         Changed();
     }
@@ -325,7 +452,7 @@ public sealed class MainForm : Form
         if (dlg.ShowDialog(this) == DialogResult.OK) SetKey(dlg.Color.ToArgb());
     }
 
-    // ---------- drift colours ----------
+    // ---------- colour selection (canvas and list) ----------
 
     private void RefreshColors()
     {
@@ -355,27 +482,44 @@ public sealed class MainForm : Form
         }
     }
 
+    // List -> canvas
     private void OnColorChecked(ListViewItem item)
     {
         if (syncing || item.Tag is not int color) return;
         if (item.Checked) view.Highlight.Add(color); else view.Highlight.Remove(color);
-        if (view.KeyView) view.Rebuild();
+        view.Rebuild();
+        SelectionChanged();
     }
 
-    private void ToggleColor(int color)
+    // Canvas -> list: sync the check box of a colour (adding a row if it is beyond the list cap).
+    private void SyncCheck(int color)
     {
-        if (current == null || color == current.Key) return;
-        if (!view.Highlight.Add(color)) view.Highlight.Remove(color);
         bool listed = false;
         syncing = true;
         try
         {
             foreach (ListViewItem item in colorList.Items)
-                if (item.Tag is int c && c == color) { item.Checked = view.Highlight.Contains(color); item.EnsureVisible(); listed = true; }
+                if (item.Tag is int c && c == color)
+                {
+                    item.Checked = view.Highlight.Contains(c);
+                    item.EnsureVisible();
+                    item.Selected = true;
+                    listed = true;
+                    break;
+                }
         }
         finally { syncing = false; }
-        if (!listed) RefreshColors();
-        if (view.KeyView) view.Rebuild();
+        if (!listed && view.Highlight.Contains(color)) RefreshColors();
+        view.Rebuild();
+        SelectionChanged();
+    }
+
+    private void SelectionChanged()
+    {
+        int px = 0;
+        if (current != null && view.Highlight.Count > 0)
+            foreach (int c in current.Pixels) if (view.Highlight.Contains(c)) px++;
+        selectedLabel.Text = $"Selected: {view.Highlight.Count} colours, {px} pixels";
     }
 
     private void SelectWithinDistance()
@@ -383,17 +527,23 @@ public sealed class MainForm : Form
         if (current == null) return;
         int max = (int)distanceBox.Value;
         foreach (var c in stats)
-            if (c.Distance <= max) view.Highlight.Add(c.Color);
+            if (c.Distance <= max && c.Color != current.Key) view.Highlight.Add(c.Color);
         RefreshColors();
         view.Rebuild();
+        SelectionChanged();
     }
 
-    private void SetAllChecks(bool on)
+    // Double-click a list row: centre the canvas on the first pixel of that colour.
+    private void CenterOnSelectedColor()
     {
-        if (!on) view.Highlight.Clear();
-        RefreshColors();
-        view.Rebuild();
+        if (current == null || colorList.SelectedItems.Count == 0 || colorList.SelectedItems[0].Tag is not int color) return;
+        int i = Array.IndexOf(current.Pixels, color);
+        if (i < 0) return;
+        view.CenterOn(i % current.Width, i / current.Width);
+        status.Text = $"{color:X6} first at ({i % current.Width}, {i / current.Width}).";
     }
+
+    // ---------- edits ----------
 
     private void ReplaceSelected()
     {
@@ -425,36 +575,39 @@ public sealed class MainForm : Form
 
     private void ClearAllSheets()
     {
-        if (sheets.Count == 0) return;
+        var doc = currentDoc;
+        if (doc == null || !doc.EnsureLoaded() || doc.SheetCount == 0) return;
         if (MessageBox.Show(this,
-                "For every sheet: set the key to its first pixel and clear everything outside the frames to it.\n" +
+                $"For every sheet of {doc.Name}: set the key to its first pixel and clear everything outside the frames to it.\n" +
                 "This replaces any key already authored on those sheets.\n" +
                 "Sheets whose first pixel lies inside a frame are skipped.", "Clear all sheets",
                 MessageBoxButtons.OKCancel) != DialogResult.OK) return;
         int done = 0, skipped = 0;
         long pixels = 0;
         Cursor = Cursors.WaitCursor;
-        for (int i = 0; i < sheets.Count; i++)
+        try
         {
-            var s = Sheet(i);
-            if (s == null || s.InFrame.Length == 0 || s.InFrame[0]) { skipped++; continue; }
-            if (s.Key != s.FirstPixel) { s.Key = s.FirstPixel; s.KeyAuthored = true; }
-            int n = s.ClearOutsideFrames();
-            if (n > 0) s.KeyAuthored = true;
-            pixels += n;
-            done++;
+            for (int i = 0; i < doc.SheetCount; i++)
+            {
+                SheetImage s;
+                try { s = doc.Sheet(i); } catch { skipped++; continue; }
+                if (s.InFrame.Length == 0 || s.InFrame[0]) { skipped++; continue; }
+                if (s.Key != s.FirstPixel) { s.Key = s.FirstPixel; s.KeyAuthored = true; s.UpdateDrift(); }
+                int n = s.ClearOutsideFrames();
+                if (n > 0) s.KeyAuthored = true;
+                pixels += n;
+                done++;
+            }
         }
-        Cursor = Cursors.Default;
-        dirty = true;
+        finally { Cursor = Cursors.Default; }
         view.Highlight.Clear();
-        view.Rebuild();
-        RefreshKey();
-        RefreshColors();
-        RefreshSheetList();
-        status.Text = $"Cleared {pixels} pixels on {done} sheets; skipped {skipped} whose first pixel is inside a frame.";
+        if (doc == sheetDoc && current != null) { view.Rebuild(); RefreshKey(); RefreshColors(); }
+        RefreshNodes(doc, allSheets: true);
+        SelectionChanged();
+        status.Text = $"{doc.Name}: cleared {pixels} pixels on {done} sheets; skipped {skipped}.";
     }
 
-    // ---------- mouse ----------
+    // ---------- canvas input ----------
 
     private void OnHover(int x, int y)
     {
@@ -462,19 +615,31 @@ public sealed class MainForm : Form
         int i = y * current.Width + x;
         int c = current.Pixels[i];
         string what = c == current.Key ? "key" : $"dist {SheetImage.Distance(c, current.Key)}";
-        hover.Text = $"({x}, {y})  {c:X6}  {what}  {(current.InFrame[i] ? "inside frame" : "outside frames")}";
+        hover.Text = $"({x}, {y})  {c:X6}  {what}  {(current.InFrame[i] ? "in frame" : "outside")}";
+    }
+
+    private void OnPixelClicked(int x, int y, Keys mods)
+    {
+        if (current == null) return;
+        int c = current.Pixels[y * current.Width + x];
+        if (modeKey.Checked) { SetKey(c); return; }
+        if (c == current.Key) return;
+        if (!view.Highlight.Add(c)) view.Highlight.Remove(c);
+        SyncCheck(c);
+    }
+
+    private void OnPixelDragged(int x, int y, Keys mods)
+    {
+        if (current == null || modeKey.Checked) return;
+        int c = current.Pixels[y * current.Width + x];
+        if (c == current.Key) return;
+        bool changed = (mods & Keys.Control) != 0 ? view.Highlight.Remove(c) : view.Highlight.Add(c);
+        if (changed) SyncCheck(c);
     }
 
     protected override void Dispose(bool disposing)
     {
-        if (disposing) listFont.Dispose();
+        if (disposing) treeFont.Dispose();
         base.Dispose(disposing);
-    }
-
-    private void OnPixelClicked(int x, int y, MouseButtons button)
-    {
-        if (current == null || button != MouseButtons.Left) return;
-        int c = current.Pixels[y * current.Width + x];
-        if (modeKey.Checked) SetKey(c); else ToggleColor(c);
     }
 }
