@@ -15,7 +15,15 @@ public sealed class MainForm : Form
 
     private readonly Font treeFont = new("Consolas", 9f);
     private readonly TreeView tree = new() { Dock = DockStyle.Fill, HideSelection = false };
-    private readonly SheetView view = new() { Dock = DockStyle.Fill };
+    private readonly SheetView view = new()
+    {
+        Dock = DockStyle.Fill,
+        Hints = new[]
+        {
+            "K  key = first pixel", "C  clear outside frames", "T  transparency key view",
+            "F  fit   1  actual size   +/-  zoom",
+        },
+    };
     private readonly Panel keySwatch = new() { Size = new Size(40, 22), BorderStyle = BorderStyle.FixedSingle };
     private readonly Label keyLabel = new() { AutoSize = true, Margin = new Padding(3, 6, 3, 0) };
     private readonly CheckBox keyViewBox = new() { Text = "Transparency key view", AutoSize = true };
@@ -710,6 +718,29 @@ public sealed class MainForm : Form
         if (c == current.Key) return;
         bool changed = (mods & Keys.Control) != 0 ? view.Highlight.Remove(c) : view.Highlight.Add(c);
         if (changed) SyncCheck(c);
+    }
+
+    // Sheet hotkeys, active anywhere except while typing in a field. Listed on the canvas (SheetView.Hints).
+    // They deliberately win over tree and list type-ahead, so K, C and T work while stepping through sheets in the tree.
+    protected override bool ProcessCmdKey(ref Message msg, Keys keyData)
+    {
+        if (current != null && ActiveControl is not TextBoxBase && ActiveControl is not NumericUpDown)
+        {
+            switch (keyData)
+            {
+                case Keys.K:
+                    SetKey(current.FirstPixel);
+                    status.Text = $"Key set to the first pixel, {current.Key:X6}.";
+                    return true;
+                case Keys.C:
+                    ClearOutside();
+                    return true;
+                case Keys.T:
+                    keyViewBox.Checked = !keyViewBox.Checked;
+                    return true;
+            }
+        }
+        return base.ProcessCmdKey(ref msg, keyData);
     }
 
     protected override void Dispose(bool disposing)

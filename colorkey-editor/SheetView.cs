@@ -25,6 +25,7 @@ public sealed class SheetView : Control
     public HashSet<int> Highlight { get; } = new();
     public Color HighlightColor { get; set; } = Color.Magenta;
     public float Zoom => zoom;
+    public string[] Hints { get; set; } = Array.Empty<string>();   // hotkey lines drawn bottom-right
 
     public event Action<int, int>? PixelHovered;               // sheet x, y, or -1, -1
     public event Action<int, int, Keys>? PixelClicked;         // left click without dragging
@@ -137,7 +138,26 @@ public sealed class SheetView : Control
     {
         var g = e.Graphics;
         g.Clear(BackColor);
-        if (bitmap == null || sheet == null) return;
+        if (bitmap != null && sheet != null) PaintSheet(g);
+        PaintHints(g);
+    }
+
+    private void PaintHints(Graphics g)
+    {
+        if (Hints.Length == 0) return;
+        string text = string.Join("\n", Hints);
+        var size = g.MeasureString(text, Font);
+        var box = new RectangleF(Width - size.Width - 18, Height - size.Height - 14, size.Width + 10, size.Height + 6);
+        if (box.X < 0 || box.Y < 0) return;   // canvas too small to fit it
+        using (var back = new SolidBrush(Color.FromArgb(170, 0, 0, 0))) g.FillRectangle(back, box);
+        using var fore = new SolidBrush(Color.FromArgb(230, 230, 230));
+        g.DrawString(text, Font, fore, box.X + 5, box.Y + 3);
+    }
+
+    private void PaintSheet(Graphics g)
+    {
+        var bitmap = this.bitmap!;
+        var sheet = this.sheet!;
         g.InterpolationMode = InterpolationMode.NearestNeighbor;
         g.PixelOffsetMode = PixelOffsetMode.Half;
         var dest = new RectangleF(origin.X, origin.Y, sheet.Width * zoom, sheet.Height * zoom);

@@ -21,6 +21,9 @@ ColorKeyEditor.exe [file.pak | folder] ...
   `*` marks a changed sheet.
 - **Canvas**: mouse wheel zooms around the cursor; middle or right drag, or Space + left drag, pans; `F` fits,
   `1` is actual size, `+`/`-` zoom. A pixel grid appears from 1200%.
+- **Hotkeys** (listed bottom-right of the canvas; ignored while typing in a field): `K` sets the key to the first
+  pixel, `C` clears outside the frames to the key, `T` toggles the transparency key view. `K` then `C` cleans a
+  sheet.
 - **Transparency key view** shows key pixels as a checkerboard and selected colours in magenta, so drift pixels
   stand out. Frames are outlined in cyan.
 - **Canvas click selects colour**: click a pixel to select or deselect its colour, drag to add every colour swept
