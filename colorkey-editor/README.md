@@ -37,10 +37,10 @@ PAKLib 2.0 saves every bitmap as 24bpp, so 8bpp and 1bpp sheets are converted on
 
 ## Build
 
-Requires the .NET 8 SDK or later (Windows).
+Requires the .NET 8 SDK or later (Windows). Open `ColorKeyEditor.sln` in Visual Studio, or:
 
 ```
-dotnet build -c Release
+dotnet build ColorKeyEditor.sln -c Release
 ```
 
 It uses the NuGet `PAKLib` 2.0.1 package (2.0.0 shipped the old 1.1 DLL; skip it). Until 2.0.1 is on NuGet, or to
