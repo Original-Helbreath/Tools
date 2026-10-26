@@ -1,3 +1,5 @@
 installer/tests/
 __pycache__/
 .test-out/
+bin/
+obj/

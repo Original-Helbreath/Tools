@@ -1,0 +1,22 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net8.0-windows</TargetFramework>
+    <RollForward>Major</RollForward>
+    <UseWindowsForms>true</UseWindowsForms>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <AssemblyName>ColorKeyEditor</AssemblyName>
+    <RootNamespace>ColorKeyEditor</RootNamespace>
+  </PropertyGroup>
+
+  <!-- Build against a PAKLib checkout with: dotnet build -p:PAKLibSource=<path to PAKLib.csproj> -->
+  <ItemGroup Condition="'$(PAKLibSource)' == ''">
+    <PackageReference Include="PAKLib" Version="2.0.1" />
+  </ItemGroup>
+  <ItemGroup Condition="'$(PAKLibSource)' != ''">
+    <ProjectReference Include="$(PAKLibSource)" />
+  </ItemGroup>
+
+</Project>
