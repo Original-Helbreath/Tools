@@ -35,7 +35,7 @@ public sealed class MainForm : Form
     private readonly ListView colorList = new()
     {
         View = View.Details, VirtualMode = true, FullRowSelect = true, MultiSelect = false, Dock = DockStyle.Fill,
-        HideSelection = false,
+        HideSelection = false, OwnerDraw = true,
     };
     private readonly Dictionary<int, int> rowOf = new();   // colour -> row in the colour list
     private readonly ToolStripStatusLabel status = new() { Spring = true, TextAlign = ContentAlignment.MiddleLeft };
@@ -127,6 +127,10 @@ public sealed class MainForm : Form
         colorList.Columns.Add("Outside", 62, HorizontalAlignment.Right);
         colorList.Columns.Add("Inside", 62, HorizontalAlignment.Right);
         colorList.RetrieveVirtualItem += (_, e) => OnRetrieveItem(e);
+        colorList.DrawColumnHeader += (_, e) => e.DrawDefault = true;
+        colorList.DrawSubItem += (_, e) => DrawColorCell(e);
+        colorList.ClientSizeChanged += (_, _) => FitColorColumns();   // also fires when the scrollbar appears
+        colorList.HandleCreated += (_, _) => FitColorColumns();
         colorList.MouseClick += (_, e) => OnColorListClick(e);
         colorList.ItemActivate += (_, _) => CenterOnSelectedColor();
 
@@ -534,6 +538,7 @@ public sealed class MainForm : Form
         for (int i = 0; i < stats.Count; i++) rowOf[stats[i].Color] = i;
         colorList.SelectedIndices.Clear();
         colorList.VirtualListSize = stats.Count;
+        FitColorColumns();
         colorList.Invalidate();
     }
 
@@ -542,7 +547,7 @@ public sealed class MainForm : Form
         if (e.ItemIndex >= stats.Count) { e.Item = new ListViewItem(""); return; }
         var c = stats[e.ItemIndex];
         bool on = view.Highlight.Contains(c.Color);
-        var item = new ListViewItem((on ? "[x] " : "[ ] ") + c.Color.ToString("X6")) { Tag = c.Color, UseItemStyleForSubItems = false };
+        var item = new ListViewItem(c.Color.ToString("X6")) { Tag = c.Color, Checked = on, UseItemStyleForSubItems = false };
         item.BackColor = Color.FromArgb(c.Color | unchecked((int)0xFF000000));
         item.ForeColor = (c.Color >> 16 & 0xFF) * 3 + (c.Color >> 8 & 0xFF) * 6 + (c.Color & 0xFF) > 1280 ? Color.Black : Color.White;
         item.SubItems.Add(c.Distance.ToString());
@@ -550,6 +555,34 @@ public sealed class MainForm : Form
         item.SubItems.Add(c.Outside.ToString());
         item.SubItems.Add(c.Inside.ToString());
         e.Item = item;
+    }
+
+    // The colour cell: a check box (drawn, since a virtual list has no native ones) and the colour as background.
+    private void DrawColorCell(DrawListViewSubItemEventArgs e)
+    {
+        if (e.ColumnIndex != 0 || e.Item == null) { e.DrawDefault = true; return; }
+        var b = e.Bounds;
+        using (var back = new SolidBrush(e.Item.BackColor)) e.Graphics.FillRectangle(back, b);
+        var glyph = CheckBoxRenderer.GetGlyphSize(e.Graphics, System.Windows.Forms.VisualStyles.CheckBoxState.UncheckedNormal);
+        var at = new Point(b.X + 3, b.Y + (b.Height - glyph.Height) / 2);
+        CheckBoxRenderer.DrawCheckBox(e.Graphics, at, e.Item.Checked
+            ? System.Windows.Forms.VisualStyles.CheckBoxState.CheckedNormal
+            : System.Windows.Forms.VisualStyles.CheckBoxState.UncheckedNormal);
+        var text = new Rectangle(at.X + glyph.Width + 4, b.Y, b.Right - at.X - glyph.Width - 4, b.Height);
+        TextRenderer.DrawText(e.Graphics, e.Item.Text, colorList.Font, text, e.Item.ForeColor,
+            TextFormatFlags.VerticalCenter | TextFormatFlags.Left | TextFormatFlags.EndEllipsis);
+        if (e.Item.Selected) using (var pen = new Pen(SystemColors.Highlight, 2)) e.Graphics.DrawRectangle(pen, b.X + 1, b.Y + 1, b.Width - 2, b.Height - 2);
+    }
+
+    // Columns share the list's width so nothing runs off the side panel.
+    private void FitColorColumns()
+    {
+        int w = colorList.ClientSize.Width;
+        if (w < 100 || colorList.Columns.Count < 5) return;
+        int[] share = { 30, 14, 18, 19, 19 };
+        int used = 0;
+        for (int i = 0; i < 4; i++) { colorList.Columns[i].Width = w * share[i] / 100; used += colorList.Columns[i].Width; }
+        colorList.Columns[4].Width = w - used - 1;
     }
 
     // List -> canvas: a click toggles the row's colour (a double-click toggles twice, then centres on it).
